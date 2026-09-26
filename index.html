@@ -120,11 +120,17 @@ function proposition(classe) {
   return { id, termine: true, etape: "", source };
 }
 
-function textes(ligne, termine, etape) {
-  const suite = termine ? "" : "\nSéance à poursuivre au prochain cours" + (etape ? " (arrêt : " + etape + ")" : "") + ".";
+/**
+ * Texte ED pour une ou plusieurs activités faites dans le même cours. « Pas terminée »
+ * porte sur la dernière ; le travail à faire reprend celui des activités terminées.
+ */
+function textes(ids, termine, etape) {
+  const lignes = ids.map((id) => S.progression.find((l) => l.id === id)).filter(Boolean);
+  const intitule = (l) => (/^\d+$/.test(l.seance) ? "Activité " + l.seance + " : " : "") + l.titre;
+  const suite = termine ? "" : "\nActivité à poursuivre au prochain cours" + (etape ? " (arrêt : " + etape + ")" : "") + ".";
   return {
-    contenuSeance: [ligne.sequence, "Séance " + ligne.seance + " : " + ligne.titre, ligne.contenu].filter(Boolean).join("\n") + suite,
-    travailAFaire: ligne.travail || "",
+    contenuSeance: [...new Set(lignes.map((l) => l.sequence))].concat(lignes.flatMap((l) => [intitule(l), l.contenu])).filter(Boolean).join("\n") + suite,
+    travailAFaire: lignes.filter((l, i) => termine || i < lignes.length - 1).map((l) => l.travail).filter(Boolean).join("\n"),
   };
 }
 
@@ -165,21 +171,24 @@ function vuePointer(v) {
 function ouvrirPointage(c) {
   const dejaLa = S.lot.find((p) => p.classe === c.classe && p.date === c.date);
   if (dejaLa) {   // reprise d'un pointage du lot : on rouvre ses valeurs
-    S.pointage = { cours: c, ...dejaLa, source: "pointage déjà dans le lot" };
+    S.pointage = { cours: c, ids: [dejaLa.id], ...dejaLa, source: "pointage déjà dans le lot" };
     return afficher();
   }
   const p = proposition(c.classe);
-  const ligne = S.progression.find((l) => l.id === p.id);
-  S.pointage = { cours: c, id: p.id, termine: p.termine, etape: p.etape, source: p.source, ...(ligne ? textes(ligne, p.termine, p.etape) : { contenuSeance: "", travailAFaire: "" }) };
+  const ids = p.id ? [p.id] : [];
+  S.pointage = { cours: c, ids, termine: p.termine, etape: p.etape, source: p.source, ...textes(ids, p.termine, p.etape) };
   afficher(); scrollTo(0, 0);
 }
 
 function vuePanneau(v, P) {
   const lignes = lignesPour(P.cours.classe);
-  const i = lignes.findIndex((l) => l.id === P.id);
+  const i = lignes.findIndex((l) => l.id === P.ids[0]);
+  const j = lignes.findIndex((l) => l.id === P.ids[P.ids.length - 1]);
   const ligne = lignes[i];
-  const regen = () => { const l = S.progression.find((x) => x.id === P.id); if (l) Object.assign(P, textes(l, P.termine, P.etape)); afficher(); };
-  const aller = (d) => { const n = lignes[i + d]; if (n) { P.id = n.id; P.source = "choix manuel"; regen(); } };
+  const regen = () => { Object.assign(P, textes(P.ids, P.termine, P.etape)); afficher(); };
+  const aller = (d) => { const n = lignes[i + d]; if (n) { P.ids = [n.id]; P.source = "choix manuel"; regen(); } };
+  const ajouterSuivante = () => { const n = lignes[j + 1]; if (n) { P.ids = [...P.ids, n.id]; regen(); } };
+  const retirerDerniere = () => { if (P.ids.length > 1) { P.ids = P.ids.slice(0, -1); regen(); } };
   const cur = S.curseurs[P.cours.classe];
   v.append(
     el("div", { class: "ligne" }, el("button", { class: "btn", onclick: () => { S.pointage = null; afficher(); } }, "←"),
@@ -190,9 +199,13 @@ function vuePanneau(v, P) {
         el("button", { class: "btn nav", disabled: i <= 0, onclick: () => aller(-1) }, "◀"),
         el("div", { class: "grand", style: "text-align:center" }, ligne ? el("div", {}, el("strong", {}, ligne.titre), el("div", { class: "doux" }, ligne.sequence + " · " + ligne.id)) : el("span", { class: "err" }, "Aucune séance pour ce niveau")),
         el("button", { class: "btn nav", disabled: i < 0 || i >= lignes.length - 1, onclick: () => aller(1) }, "▶")),
+      P.ids.slice(1).map((id) => el("div", { style: "text-align:center; margin-top:6px" }, "+ ", el("strong", {}, S.progression.find((x) => x.id === id)?.titre || id))),
+      el("div", { class: "actions" },
+        el("button", { class: "btn", disabled: j < 0 || j >= lignes.length - 1, onclick: ajouterSuivante }, "+ Activité suivante"),
+        P.ids.length > 1 && el("button", { class: "btn", onclick: retirerDerniere }, "− Retirer la dernière")),
       el("div", { class: "bascule", style: "margin-top:10px" },
-        el("button", { class: "btn" + (P.termine ? " on" : ""), onclick: () => { P.termine = true; regen(); } }, "Séance terminée"),
-        el("button", { class: "btn" + (!P.termine ? " on" : ""), onclick: () => { P.termine = false; regen(); } }, "Pas terminée")),
+        el("button", { class: "btn" + (P.termine ? " on" : ""), onclick: () => { P.termine = true; regen(); } }, P.ids.length > 1 ? "Dernière terminée" : "Terminée"),
+        el("button", { class: "btn" + (!P.termine ? " on" : ""), onclick: () => { P.termine = false; regen(); } }, P.ids.length > 1 ? "Dernière commencée" : "Pas terminée")),
       !P.termine && el("div", {}, el("label", {}, "Arrêt à (étape, facultatif)"),
         el("input", { type: "text", value: P.etape, placeholder: "ex. partie 3", onchange: (e) => { P.etape = e.target.value; regen(); } }))),
     el("label", {}, "Contenu de séance (écrit dans ED)"),
@@ -205,8 +218,9 @@ function vuePanneau(v, P) {
 async function ajouterAuLot(P) {
   const c = P.cours;
   S.lot = S.lot.filter((p) => !(p.classe === c.classe && p.date === c.date));
-  S.lot.push({ classe: c.classe, date: c.date, heure: c.debut, id: P.id, termine: P.termine, etape: P.etape, contenuSeance: P.contenuSeance.trim(), travailAFaire: P.travailAFaire.trim() });
-  S.curseurs[c.classe] = { id: P.id, termine: P.termine, etape: P.etape, date: c.date, maj: new Date().toISOString() };
+  const id = P.ids[P.ids.length - 1];   // le curseur retient la dernière activité du cours
+  S.lot.push({ classe: c.classe, date: c.date, heure: c.debut, id, ids: P.ids, termine: P.termine, etape: P.etape, contenuSeance: P.contenuSeance.trim(), travailAFaire: P.travailAFaire.trim() });
+  S.curseurs[c.classe] = { id, termine: P.termine, etape: P.etape, date: c.date, maj: new Date().toISOString() };
   S.pointage = null; afficher();
   try { await Promise.all([sauverLot(), sauverCurseurs()]); message(c.classe + " ajoutée au lot."); }
   catch (e) { message("Non sauvegardé : " + e.message, 6000); }
@@ -243,6 +257,7 @@ function vueLot(v) {
 const corpsCahier = (p, dryRun) => JSON.stringify({ classeId: p.classe, date: p.date, contenuSeance: p.contenuSeance, travailAFaire: p.travailAFaire || undefined, dryRun, force: !!p.force });
 
 async function simuler() {
+  message("Simulation en cours… (ED est relu, rien n'est écrit)", 20000);
   for (const p of S.lot) {
     let s;
     try {
