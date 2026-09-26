@@ -350,13 +350,14 @@ function lireSource(texte) {
   const lignes = lireTableau(texte);
   if (lignes.length < 2) return message("Il faut la ligne d'en-têtes et au moins une ligne d'élève.");
   const entetes = lignes[0].map((e) => e.trim());
-  const trouve = (re) => entetes.findIndex((e) => re.test(e));
+  // Premier motif qui trouve une colonne : l'ordre fixe la priorité (« NOTE » avant « TOTAL /30 »).
+  const trouve = (...motifs) => { for (const re of motifs) { const i = entetes.findIndex((e) => re.test(e)); if (i >= 0) return i; } return -1; };
   N.source = {
     entetes, lignes: lignes.slice(1), nonTrouves: [],
     col: {
       nom: Math.max(trouve(/^(nom|[ée]l[èe]ve|nom.*pr[ée]nom|name)/i), 0),
       prenom: trouve(/^pr[ée]nom/i),
-      note: trouve(/^(note|score|total|r[ée]sultat|points)/i),
+      note: trouve(/^note\s*(\/\s*\d+)?$/i, /^note/i, /^(score|r[ée]sultat)/i, /^(total|points)/i),
       commentaire: trouve(/(appr[ée]ciation|commentaire|remarque)/i),
     },
   };
