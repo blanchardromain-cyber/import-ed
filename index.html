@@ -25,7 +25,7 @@
   .btn.prim { background:var(--acc); border-color:var(--acc); color:#fff; font-weight:600; }
   .btn:disabled { opacity:.5; }
   .nav { width:48px; padding:12px 0; }
-  textarea, input[type=text], input[type=password], input[type=url] { width:100%; font:inherit; padding:10px; border-radius:8px; border:1px solid var(--bord); background:var(--fond); color:var(--texte); }
+  textarea, select, input[type=text], input[type=password], input[type=url] { width:100%; font:inherit; padding:10px; border-radius:8px; border:1px solid var(--bord); background:var(--fond); color:var(--texte); }
   textarea { min-height:120px; }
   label { display:block; margin:10px 0 4px; font-size:14px; color:var(--doux); }
   .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
@@ -39,6 +39,7 @@
 <header id="onglets">
   <button data-vue="pointer" class="actif">Pointer</button>
   <button data-vue="lot">Lot</button>
+  <button data-vue="notes">Notes</button>
   <button data-vue="journal">Journal</button>
   <button data-vue="reglages">⚙</button>
 </header>
@@ -55,6 +56,7 @@ const MATIERES = ["TECHN", "CULTN"];   // cours concernés par le pointage
 const JOURS_PASSES = 7;
 
 let S = { progression: [], curseurs: {}, lot: [], journal: [], cours: [], vue: "pointer", pointage: null, simu: {} };
+const N = { classeId: "", periode: stock.lire("periode", "A001"), devoirs: [], devoirId: "", eleves: [], saisies: {}, noteSur: "", arrondi: stock.lire("arrondi", "0.5"), source: null, apercu: null };
 
 // ---------- utilitaires ----------
 const $ = (sel) => document.querySelector(sel);
@@ -138,13 +140,13 @@ function afficher() {
   document.querySelectorAll("#onglets button").forEach((b) => b.classList.toggle("actif", b.dataset.vue === S.vue));
   $("#onglets [data-vue=lot]").textContent = "Lot" + (S.lot.length ? " (" + S.lot.length + ")" : "");
   const v = $("#vue"); v.replaceChildren();
-  ({ pointer: vuePointer, lot: vueLot, journal: vueJournal, reglages: vueReglages })[S.vue](v);
+  ({ pointer: vuePointer, lot: vueLot, notes: vueNotes, journal: vueJournal, reglages: vueReglages })[S.vue](v);
 }
 
 function vuePointer(v) {
   if (S.pointage) return vuePanneau(v, S.pointage);
   const passes = S.cours
-    .filter((c) => MATIERES.includes(c.matiere) && !c.annule && c.date <= decaler(0))
+    .filter((c) => MATIERES.includes(c.matiere) && !c.annule && c.date >= decaler(-JOURS_PASSES) && c.date <= decaler(0))
     .sort((a, b) => b.date.localeCompare(a.date) || a.debut.localeCompare(b.debut));
   if (!passes.length) v.append(el("p", { class: "doux" }, "Aucun cours sur les " + JOURS_PASSES + " derniers jours."));
   let jour = "";
@@ -280,6 +282,14 @@ async function ecrire(liste) {
 function vueJournal(v) {
   if (!S.journal.length) return v.append(el("p", { class: "doux" }, "Aucune écriture."));
   for (const j of S.journal) {
+    if (j.type === "notes") {
+      const ok = j.verification === "ok";
+      v.append(el("div", { class: "carte" },
+        el("div", { class: "ligne" }, el("strong", { class: "grand" }, "Notes " + j.classe + " · " + (j.devoir?.libelle || "")),
+          el("span", { class: "etiq " + (ok ? "ok" : "err") }, ok ? "vérifié" : "à vérifier")),
+        el("div", { class: "doux" }, j.aEcrire + " élève(s) · écrit le " + new Date(j.quand).toLocaleString("fr-FR"))));
+      continue;
+    }
     v.append(el("div", { class: "carte" },
       el("div", { class: "ligne" }, el("strong", { class: "grand" }, j.classe + " · " + (j.cours || "")),
         el("span", { class: "etiq " + (Object.values(j.verification || {}).every(Boolean) ? "ok" : "err") }, Object.values(j.verification || {}).every(Boolean) ? "vérifié" : "à vérifier")),
@@ -296,11 +306,210 @@ function vueReglages(v) {
     el("div", { class: "actions" }, el("button", { class: "btn prim", onclick: () => { stock.ecrire("reglages", { url: url.value.trim(), cle: cle.value.trim() }); charger(); } }, "Enregistrer et charger")));
 }
 
+// ---------- notes ----------
+const LETTRES = ["Abs", "Disp", "NE", "EA", "Inap", "NR"];
+const PERIODES = [["A001", "Trimestre 1"], ["A002", "Trimestre 2"], ["A003", "Trimestre 3"]];
+const cleNom = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase().replace(/[^A-Z]+/g, " ").trim();
+const classesNotes = () => [...new Map(S.cours.filter((c) => c.type === "classe" && MATIERES.includes(c.matiere)).map((c) => [c.classe, c])).values()]
+  .sort((a, b) => a.classe.localeCompare(b.classe));
+const classeNotes = () => classesNotes().find((c) => String(c.id) === N.classeId);
+const devoirNotes = () => N.devoirs.find((d) => String(d.id) === N.devoirId);
+
+function lireTableau(texte) {
+  const premiere = texte.split(/\r?\n/)[0] || "";
+  const sep = premiere.includes("\t") ? "\t" : (premiere.split(";").length > premiere.split(",").length ? ";" : ",");
+  const lignes = []; let ligne = [], champ = "", guill = false;
+  for (let i = 0; i < texte.length; i++) {
+    const ch = texte[i];
+    if (guill) { if (ch === '"' && texte[i + 1] === '"') { champ += '"'; i++; } else if (ch === '"') guill = false; else champ += ch; }
+    else if (ch === '"' && !champ) guill = true;
+    else if (ch === sep) { ligne.push(champ); champ = ""; }
+    else if (ch === "\n" || ch === "\r") { if (ch === "\r" && texte[i + 1] === "\n") i++; ligne.push(champ); lignes.push(ligne); ligne = []; champ = ""; }
+    else champ += ch;
+  }
+  if (champ || ligne.length) { ligne.push(champ); lignes.push(ligne); }
+  return lignes.filter((l) => l.some((c) => c.trim()));
+}
+
+function lireSource(texte) {
+  const lignes = lireTableau(texte);
+  if (lignes.length < 2) return message("Il faut la ligne d'en-têtes et au moins une ligne d'élève.");
+  const entetes = lignes[0].map((e) => e.trim());
+  const trouve = (re) => entetes.findIndex((e) => re.test(e));
+  N.source = {
+    entetes, lignes: lignes.slice(1), nonTrouves: [],
+    col: {
+      nom: Math.max(trouve(/^(nom|[ée]l[èe]ve|nom.*pr[ée]nom|name)/i), 0),
+      prenom: trouve(/^pr[ée]nom/i),
+      note: trouve(/^(note|score|total|r[ée]sultat|points)/i),
+      commentaire: trouve(/(appr[ée]ciation|commentaire|remarque)/i),
+    },
+  };
+  afficher();
+}
+
+function appliquerSource() {
+  const { col, lignes } = N.source;
+  if (col.note < 0 && col.commentaire < 0) return message("Choisir au moins la colonne Note ou Commentaire.");
+  const index = new Map();
+  for (const e of N.eleves) for (const k of new Set([cleNom(e.nom + " " + e.prenom), cleNom(e.prenom + " " + e.nom)])) index.set(k, [...(index.get(k) || []), e.id]);
+  N.source.nonTrouves = []; let places = 0, surSource = "";
+  for (const l of lignes) {
+    const nom = [l[col.nom], col.prenom >= 0 ? l[col.prenom] : ""].filter(Boolean).join(" ").trim();
+    let note = col.note >= 0 ? (l[col.note] || "").trim() : "";
+    const commentaire = col.commentaire >= 0 ? (l[col.commentaire] || "").trim() : "";
+    const fraction = /^([\d.,]+)\s*\/\s*(\d+(?:[.,]\d+)?)$/.exec(note);   // « 12 / 20 » (Google Forms)
+    if (fraction) { note = fraction[1]; surSource = fraction[2].replace(",", "."); }
+    if (!nom) continue;
+    if (cleNom(nom).startsWith("BAREME")) { surSource = note.replace(/^\//, "").replace(",", "."); continue; }
+    if (!note && !commentaire) continue;
+    const ids = [...new Set(index.get(cleNom(nom)) || [])];
+    if (ids.length === 1) { N.saisies[ids[0]] = { note, commentaire }; places++; }
+    else N.source.nonTrouves.push({ nom, note, commentaire, raison: ids.length ? "homonymes" : "introuvable" });
+  }
+  if (surSource) N.noteSur = surSource;
+  N.apercu = null;
+  message(places + " élève(s) rempli(s)" + (N.source.nonTrouves.length ? ", " + N.source.nonTrouves.length + " à rattacher à la main." : "."));
+  afficher();
+}
+
+function arrondir(brut) {
+  const lettre = LETTRES.find((x) => x.toLowerCase() === brut.trim().toLowerCase());
+  if (lettre) return lettre;
+  const v = Number(brut.replace(",", "."));
+  if (!brut.trim() || !Number.isFinite(v)) return brut.trim();
+  const pas = Number(N.arrondi);
+  return String(pas ? Math.round(v / pas) * pas : v).replace(/(\.\d{2})\d+$/, "$1");
+}
+
+function notesAEnvoyer() {
+  const liste = [];
+  for (const e of N.eleves) {
+    const s = N.saisies[e.id]; if (!s) continue;
+    const note = s.note ? arrondir(s.note) : "";
+    const commentaire = (s.commentaire || "").trim();
+    const noteChange = note && note !== e.note && !(Number(note) === Number(e.note) && e.note !== "");
+    const commChange = commentaire && commentaire !== e.commentaire;
+    if (noteChange || commChange) liste.push({ eleve: e.nom + " " + e.prenom, ...(noteChange ? { note } : {}), ...(commChange ? { commentaire } : {}) });
+  }
+  return liste;
+}
+
+async function chargerDevoirs() {
+  N.devoirs = []; N.devoirId = ""; N.eleves = []; N.saisies = {}; N.source = null; N.apercu = null;
+  if (!N.classeId) return afficher();
+  try { N.devoirs = (await api("/evaluations?classeId=" + N.classeId + "&periode=" + N.periode + "&matiere=" + classeNotes().matiere)).devoirs || []; }
+  catch (e) { message(e.message, 6000); }
+  afficher();
+}
+
+async function chargerEleves() {
+  N.eleves = []; N.saisies = {}; N.apercu = null;
+  const d = devoirNotes(); N.noteSur = d ? String(d.noteSur) : "";
+  if (!d) return afficher();
+  try { N.eleves = (await api("/evaluations?classeId=" + N.classeId + "&periode=" + N.periode + "&matiere=" + classeNotes().matiere + "&devoirId=" + N.devoirId)).eleves || []; }
+  catch (e) { message(e.message, 6000); }
+  afficher();
+}
+
+const corpsNotes = (notes, dryRun, force) => JSON.stringify({ classeId: N.classeId, classe: classeNotes()?.classe, codePeriode: N.periode, devoirId: N.devoirId, matiereCode: classeNotes()?.matiere, noteSur: Number(String(N.noteSur).replace(",", ".")), notes, dryRun, force });
+
+async function simulerNotes() {
+  const notes = notesAEnvoyer();
+  if (!notes.length) return message("Aucune note nouvelle ou modifiée à envoyer.");
+  try { N.apercu = await api("/notes", { method: "POST", body: corpsNotes(notes, true, false) }); } catch (e) { N.apercu = { erreur: e.message }; }
+  afficher();
+}
+
+async function ecrireNotesED() {
+  const notes = notesAEnvoyer();
+  const remplacements = (N.apercu?.eleves || []).filter((l) => l.statut === "remplacement");
+  const texte = "Écrire " + notes.length + " élève(s) dans « " + devoirNotes().libelle + " » (" + classeNotes().classe + ") ?"
+    + (remplacements.length ? "\n\n" + remplacements.length + " REMPLACEMENT(S) :\n" + remplacements.map((l) => "• " + l.eleve + " " + (l.note?.actuelle ?? "") + " → " + (l.note?.proposee ?? l.note ?? "")).join("\n") : "");
+  if (!confirm(texte)) return;
+  try {
+    const r = await api("/notes", { method: "POST", body: corpsNotes(notes, false, remplacements.length > 0) });
+    if (r.erreur || r.refus) { N.apercu = r; return afficher(); }
+    S.journal.unshift({ type: "notes", quand: new Date().toISOString(), classe: classeNotes().classe, devoir: r.devoir, aEcrire: r.aEcrire, verification: r.verification });
+    message(r.verification === "ok" ? "✓ " + r.aEcrire + " note(s) écrite(s) et vérifiée(s)." : "Écrit, mais relecture différente pour : " + (r.verification.echecs || []).join(", "), 6000);
+    await chargerEleves();
+  } catch (e) { N.apercu = { erreur: e.message }; afficher(); }
+}
+
+function vueNotes(v) {
+  const choix = (valeur, options, onchange) => el("select", { onchange }, options.map(([val, lib]) => el("option", { value: val, selected: String(val) === String(valeur) }, lib)));
+  v.append(el("div", { class: "carte" },
+    el("label", {}, "Classe"),
+    choix(N.classeId, [["", "— choisir —"], ...classesNotes().map((c) => [String(c.id), c.classe])], (e) => { N.classeId = e.target.value; chargerDevoirs(); }),
+    el("label", {}, "Période"),
+    choix(N.periode, PERIODES, (e) => { N.periode = e.target.value; stock.ecrire("periode", N.periode); chargerDevoirs(); }),
+    N.classeId && el("label", {}, "Évaluation (créée dans ED)"),
+    N.classeId && choix(N.devoirId, [["", N.devoirs.length ? "— choisir —" : "aucune évaluation sur cette période"], ...N.devoirs.map((d) => [String(d.id), d.libelle + " · " + d.date + " · /" + d.noteSur + " · " + d.nbNotes + " note(s)"])],
+      (e) => { N.devoirId = e.target.value; chargerEleves(); })));
+  const d = devoirNotes();
+  if (!d || !N.eleves.length) return;
+
+  const src = el("textarea", { placeholder: "Coller ici les colonnes copiées depuis le Sheet, ligne d'en-têtes comprise" });
+  const fichier = el("input", { type: "file", accept: ".csv,.tsv,.txt", onchange: async (e) => { const f = e.target.files[0]; if (f) lireSource(await f.text()); } });
+  const S2 = N.source;
+  const colonne = (cle, facultatif) => choix(S2.col[cle], [...(facultatif ? [[-1, "— aucune —"]] : []), ...S2.entetes.map((h, i) => [i, h || "(colonne " + (i + 1) + ")"])], (e) => (S2.col[cle] = Number(e.target.value)));
+  v.append(el("div", { class: "carte" },
+    el("strong", {}, "Importer (facultatif)"),
+    !S2 && el("div", {}, src, el("div", { class: "actions" }, el("button", { class: "btn", onclick: () => lireSource(src.value) }, "Lire le collage")), el("label", {}, "ou un fichier CSV"), fichier),
+    S2 && el("div", {},
+      el("div", { class: "doux" }, S2.lignes.length + " ligne(s) lue(s). Vérifier les colonnes :"),
+      el("label", {}, "Nom (ou Nom Prénom)"), colonne("nom"), el("label", {}, "Prénom"), colonne("prenom", true),
+      el("label", {}, "Note"), colonne("note", true), el("label", {}, "Commentaire"), colonne("commentaire", true),
+      el("div", { class: "actions" }, el("button", { class: "btn", onclick: () => { N.source = null; afficher(); } }, "Autre source"), el("button", { class: "btn prim", onclick: appliquerSource }, "Remplir la grille")),
+      S2.nonTrouves.map((n) => el("div", { style: "margin-top:8px" },
+        el("div", { class: "alerte" }, "⚠ « " + n.nom + " » " + n.raison + " (" + (n.note || "sans note") + ") : rattacher à"),
+        choix("", [["", "— ignorer —"], ...N.eleves.map((e) => [String(e.id), e.nom + " " + e.prenom])], (e) => {
+          if (!e.target.value) return;
+          N.saisies[e.target.value] = { note: n.note, commentaire: n.commentaire };
+          S2.nonTrouves = S2.nonTrouves.filter((x) => x !== n); N.apercu = null; afficher();
+        }))))));
+
+  const surDiff = Number(String(N.noteSur).replace(",", ".")) !== Number(d.noteSur);
+  v.append(el("div", { class: "carte" },
+    el("div", { class: "ligne" },
+      el("div", { class: "grand" }, el("label", {}, "Notes saisies sur"), el("input", { type: "text", inputmode: "decimal", value: N.noteSur, onchange: (e) => { N.noteSur = e.target.value; afficher(); } })),
+      el("div", { class: "grand" }, el("label", {}, "Arrondi"), choix(N.arrondi, [["0", "aucun"], ["0.1", "au dixième"], ["0.25", "au quart"], ["0.5", "au demi-point"]], (e) => { N.arrondi = e.target.value; stock.ecrire("arrondi", N.arrondi); N.apercu = null; afficher(); }))),
+    surDiff && el("div", { class: "err", style: "margin-top:8px" }, "Barème différent : évaluation ED sur " + d.noteSur + ". Rien ne sera écrit (aucune conversion).")));
+
+  const avecComm = N.eleves.some((e) => e.commentaire) || Object.values(N.saisies).some((s) => s.commentaire);
+  const grille = el("div", { class: "carte" }, el("div", { class: "doux" }, "Note ED actuelle à gauche, nouvelle note à droite (vide = inchangée). Lettres : " + LETTRES.join(", ") + "."));
+  for (const e of N.eleves) {
+    const s = N.saisies[e.id] || (N.saisies[e.id] = { note: "", commentaire: "" });
+    grille.append(el("div", { style: "padding:6px 0; border-top:1px solid var(--bord)" },
+      el("div", { class: "ligne" },
+        el("div", { class: "grand" }, e.nom + " " + e.prenom),
+        el("span", { class: "doux", style: "width:44px; text-align:right" }, e.note || "—"),
+        el("input", { type: "text", inputmode: "decimal", value: s.note, style: "width:72px", oninput: (ev) => { s.note = ev.target.value; N.apercu = null; } })),
+      avecComm && el("input", { type: "text", value: s.commentaire || "", placeholder: e.commentaire || "commentaire", style: "margin-top:4px; font-size:14px", oninput: (ev) => { s.commentaire = ev.target.value; N.apercu = null; } })));
+  }
+  v.append(grille);
+
+  const a = N.apercu;
+  if (a) {
+    const lignes = a.eleves || [];
+    const compte = (st) => lignes.filter((l) => l.statut === st).length;
+    v.append(el("div", { class: "carte" },
+      a.erreur && el("div", { class: "err" }, a.erreur),
+      !a.erreur && el("div", {}, "Ajouts : " + compte("ajout") + " · Remplacements : " + compte("remplacement") + " · Commentaires : " + compte("ajout du commentaire") + " · Déjà à jour : " + compte("déjà à jour")),
+      lignes.filter((l) => l.statut === "remplacement").map((l) => el("div", { class: "alerte" }, "↺ " + l.eleve + " : " + (l.note?.actuelle ?? l.note ?? "") + " → " + (l.note?.proposee ?? l.note ?? "") + (l.commentaire ? " (commentaire remplacé)" : ""))),
+      (a.ignores || []).map((i) => el("div", { class: "err" }, "✗ " + i.eleve + " : " + i.raison))));
+  }
+  const pret = a && !a.erreur && a.aEcrire > 0;
+  v.append(el("div", { class: "actions" },
+    el("button", { class: "btn", disabled: surDiff, onclick: simulerNotes }, "Simuler"),
+    el("button", { class: "btn prim", disabled: !pret || surDiff, onclick: ecrireNotesED }, "Écrire" + (pret ? " (" + a.aEcrire + ")" : ""))));
+}
+
 // ---------- chargement ----------
 async function charger() {
   try {
     message("Chargement…", 10000);
-    const [progression, etat, cours] = await Promise.all([api("/progression"), api("/etat"), api("/cours?debut=" + decaler(-JOURS_PASSES) + "&fin=" + decaler(0))]);
+    const [progression, etat, cours] = await Promise.all([api("/progression"), api("/etat"), api("/cours?debut=" + decaler(-14) + "&fin=" + decaler(0))]);
     Object.assign(S, { progression, curseurs: etat.curseurs, lot: etat.lot, journal: etat.journal, cours });
     S.vue = S.vue === "reglages" ? "pointer" : S.vue;
     message("Prêt.", 1200);
