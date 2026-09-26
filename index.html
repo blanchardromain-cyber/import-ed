@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Import ED</title>
+<style>
+  :root { --fond:#f6f7f9; --carte:#fff; --texte:#1c1f24; --doux:#667085; --bord:#d9dde3; --acc:#1f6feb; --ok:#1a7f37; --alerte:#b54708; --err:#c0362c; }
+  @media (prefers-color-scheme: dark) { :root { --fond:#111418; --carte:#1b2026; --texte:#e7eaee; --doux:#98a2b3; --bord:#2e353d; --acc:#4c8dff; --ok:#3fb950; --alerte:#e3a008; --err:#f85149; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.4 system-ui, sans-serif; background:var(--fond); color:var(--texte); }
+  header { position:sticky; top:0; background:var(--carte); border-bottom:1px solid var(--bord); display:flex; z-index:2; }
+  header button { flex:1; padding:14px 4px; border:0; background:none; color:var(--doux); font-size:15px; border-bottom:3px solid transparent; }
+  header button.actif { color:var(--acc); border-bottom-color:var(--acc); font-weight:600; }
+  main { max-width:640px; margin:0 auto; padding:12px 16px 80px; }
+  .carte { background:var(--carte); border:1px solid var(--bord); border-radius:10px; padding:12px; margin:10px 0; }
+  .ligne { display:flex; align-items:center; gap:8px; }
+  .ligne > .grand { flex:1; min-width:0; }
+  .doux { color:var(--doux); font-size:14px; }
+  .jour { margin:18px 0 4px; font-weight:600; color:var(--doux); text-transform:capitalize; }
+  button.cours { width:100%; text-align:left; background:var(--carte); color:var(--texte); border:1px solid var(--bord); border-radius:10px; padding:12px; margin:6px 0; font-size:16px; }
+  .etiq { font-size:12px; padding:2px 8px; border-radius:99px; border:1px solid currentColor; white-space:nowrap; }
+  .ok { color:var(--ok); } .alerte { color:var(--alerte); } .err { color:var(--err); }
+  .btn { padding:12px 16px; border-radius:8px; border:1px solid var(--bord); background:var(--carte); color:var(--texte); font-size:16px; }
+  .btn.prim { background:var(--acc); border-color:var(--acc); color:#fff; font-weight:600; }
+  .btn:disabled { opacity:.5; }
+  .nav { width:48px; padding:12px 0; }
+  textarea, input[type=text], input[type=password], input[type=url] { width:100%; font:inherit; padding:10px; border-radius:8px; border:1px solid var(--bord); background:var(--fond); color:var(--texte); }
+  textarea { min-height:120px; }
+  label { display:block; margin:10px 0 4px; font-size:14px; color:var(--doux); }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+  .actions .btn { flex:1; }
+  pre { white-space:pre-wrap; margin:6px 0; font:inherit; font-size:14px; }
+  .bascule { display:flex; gap:6px; } .bascule .btn { flex:1; } .bascule .btn.on { border-color:var(--acc); color:var(--acc); font-weight:600; }
+  #msg { position:fixed; left:16px; right:16px; bottom:16px; max-width:608px; margin:0 auto; padding:12px; border-radius:8px; background:var(--texte); color:var(--fond); display:none; }
+</style>
+</head>
+<body>
+<header id="onglets">
+  <button data-vue="pointer" class="actif">Pointer</button>
+  <button data-vue="lot">Lot</button>
+  <button data-vue="journal">Journal</button>
+  <button data-vue="reglages">⚙</button>
+</header>
+<main id="vue"></main>
+<div id="msg"></div>
+<script>
+"use strict";
+// ---------- stockage local (réglages seulement) ----------
+const stock = {
+  lire(k, d) { try { return JSON.parse(localStorage.getItem("importED." + k)) ?? d; } catch { return d; } },
+  ecrire(k, v) { try { localStorage.setItem("importED." + k, JSON.stringify(v)); } catch {} },
+};
+const MATIERES = ["TECHN", "CULTN"];   // cours concernés par le pointage
+const JOURS_PASSES = 7;
+
+let S = { progression: [], curseurs: {}, lot: [], journal: [], cours: [], vue: "pointer", pointage: null, simu: {} };
+
+// ---------- utilitaires ----------
+const $ = (sel) => document.querySelector(sel);
+function el(tag, attrs = {}, ...enfants) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (k === "class") e.className = v;
+    else if (v !== false && v != null) e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of enfants.flat()) if (c != null && c !== false) e.append(c.nodeType ? c : String(c));
+  return e;
+}
+function message(t, duree = 3500) { const m = $("#msg"); m.textContent = t; m.style.display = "block"; clearTimeout(message.t); message.t = setTimeout(() => (m.style.display = "none"), duree); }
+const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+const decaler = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return iso(d); };
+const jourLong = (date) => new Date(date + "T12:00").toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
+const jourCourt = (date) => new Date(date + "T12:00").toLocaleDateString("fr-FR", { weekday: "short", day: "2-digit", month: "2-digit" });
+
+async function api(chemin, options = {}) {
+  const r = stock.lire("reglages", {});
+  if (!r.url || !r.cle) throw new Error("Réglages incomplets (⚙).");
+  const res = await fetch(r.url.replace(/\/$/, "") + "/api" + chemin, {
+    ...options,
+    headers: { Authorization: "Bearer " + r.cle, "Content-Type": "application/json" },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && res.status !== 422) throw new Error(data.erreur || "HTTP " + res.status);
+  return data;
+}
+const sauverLot = () => api("/lot", { method: "PUT", body: JSON.stringify(S.lot) });
+const sauverCurseurs = () => api("/curseurs", { method: "PUT", body: JSON.stringify(S.curseurs) });
+
+// ---------- logique de progression ----------
+const niveauDe = (classe) => classe.charAt(0);
+const typeDe = (classe) => (classe.includes("_") ? "groupe" : "classe");
+const lignesPour = (classe) => S.progression.filter((l) => l.niveau === niveauDe(classe) && l.groupe === typeDe(classe));
+
+/**
+ * Point proposé. La séance vient du curseur de la classe (séance commencée, sinon la
+ * suivante) ; sans curseur, du point de la dernière classe pointée du niveau. Quand
+ * cette dernière classe a travaillé la même séance, on reprend son point d'arrêt
+ * (terminée ou non, étape) : les classes d'un niveau s'arrêtent souvent au même endroit.
+ */
+function proposition(classe) {
+  const lignes = lignesPour(classe);
+  const derniere = Object.entries(S.curseurs)
+    .filter(([c, v]) => c !== classe && niveauDe(c) === niveauDe(classe) && typeDe(c) === typeDe(classe) && lignes.some((l) => l.id === v.id))
+    .sort((a, b) => (b[1].maj || "").localeCompare(a[1].maj || ""))[0];
+  const propre = S.curseurs[classe];
+  let id, source;
+  if (propre && lignes.some((l) => l.id === propre.id)) {
+    const i = lignes.findIndex((l) => l.id === propre.id);
+    [id, source] = propre.termine === false ? [propre.id, "suite de la séance commencée"]
+      : lignes[i + 1] ? [lignes[i + 1].id, "séance suivante de la classe"] : [propre.id, "fin de la progression"];
+  } else if (derniere) [id, source] = [derniere[1].id, "comme " + derniere[0]];
+  else [id, source] = [lignes[0]?.id, "début de la progression"];
+  if (derniere && derniere[1].id === id) {
+    return { id, termine: derniere[1].termine !== false, etape: derniere[1].etape || "", source: source + " · arrêt comme " + derniere[0] };
+  }
+  return { id, termine: true, etape: "", source };
+}
+
+function textes(ligne, termine, etape) {
+  const suite = termine ? "" : "\nSéance à poursuivre au prochain cours" + (etape ? " (arrêt : " + etape + ")" : "") + ".";
+  return {
+    contenuSeance: [ligne.sequence, "Séance " + ligne.seance + " : " + ligne.titre, ligne.contenu].filter(Boolean).join("\n") + suite,
+    travailAFaire: ligne.travail || "",
+  };
+}
+
+const cleCours = (c) => c.classe + "|" + c.date;
+function etatCours(c) {
+  if (S.lot.some((p) => p.classe === c.classe && p.date === c.date)) return ["dans le lot", "alerte"];
+  if (S.journal.some((j) => j.classe === c.classe && (j.cours || "").startsWith(c.date))) return ["écrit", "ok"];
+  return ["à pointer", ""];
+}
+
+// ---------- vues ----------
+function afficher() {
+  document.querySelectorAll("#onglets button").forEach((b) => b.classList.toggle("actif", b.dataset.vue === S.vue));
+  $("#onglets [data-vue=lot]").textContent = "Lot" + (S.lot.length ? " (" + S.lot.length + ")" : "");
+  const v = $("#vue"); v.replaceChildren();
+  ({ pointer: vuePointer, lot: vueLot, journal: vueJournal, reglages: vueReglages })[S.vue](v);
+}
+
+function vuePointer(v) {
+  if (S.pointage) return vuePanneau(v, S.pointage);
+  const passes = S.cours
+    .filter((c) => MATIERES.includes(c.matiere) && !c.annule && c.date <= decaler(0))
+    .sort((a, b) => b.date.localeCompare(a.date) || a.debut.localeCompare(b.debut));
+  if (!passes.length) v.append(el("p", { class: "doux" }, "Aucun cours sur les " + JOURS_PASSES + " derniers jours."));
+  let jour = "";
+  for (const c of passes) {
+    if (c.date !== jour) { jour = c.date; v.append(el("div", { class: "jour" }, jourLong(jour))); }
+    const [etat, cls] = etatCours(c);
+    const cur = S.curseurs[c.classe];
+    v.append(el("button", { class: "cours", onclick: () => ouvrirPointage(c) },
+      el("div", { class: "ligne" },
+        el("div", { class: "grand" }, el("strong", {}, c.classe), " ", el("span", { class: "doux" }, c.debut + "–" + c.fin),
+          el("div", { class: "doux" }, cur ? "dernier point : " + cur.id + (cur.termine === false ? " (en cours)" : "") : "aucun point")),
+        el("span", { class: "etiq " + cls }, etat))));
+  }
+}
+
+function ouvrirPointage(c) {
+  const dejaLa = S.lot.find((p) => p.classe === c.classe && p.date === c.date);
+  if (dejaLa) {   // reprise d'un pointage du lot : on rouvre ses valeurs
+    S.pointage = { cours: c, ...dejaLa, source: "pointage déjà dans le lot" };
+    return afficher();
+  }
+  const p = proposition(c.classe);
+  const ligne = S.progression.find((l) => l.id === p.id);
+  S.pointage = { cours: c, id: p.id, termine: p.termine, etape: p.etape, source: p.source, ...(ligne ? textes(ligne, p.termine, p.etape) : { contenuSeance: "", travailAFaire: "" }) };
+  afficher(); scrollTo(0, 0);
+}
+
+function vuePanneau(v, P) {
+  const lignes = lignesPour(P.cours.classe);
+  const i = lignes.findIndex((l) => l.id === P.id);
+  const ligne = lignes[i];
+  const regen = () => { const l = S.progression.find((x) => x.id === P.id); if (l) Object.assign(P, textes(l, P.termine, P.etape)); afficher(); };
+  const aller = (d) => { const n = lignes[i + d]; if (n) { P.id = n.id; P.source = "choix manuel"; regen(); } };
+  const cur = S.curseurs[P.cours.classe];
+  v.append(
+    el("div", { class: "ligne" }, el("button", { class: "btn", onclick: () => { S.pointage = null; afficher(); } }, "←"),
+      el("div", { class: "grand" }, el("strong", {}, P.cours.classe), " · ", jourCourt(P.cours.date), " ", P.cours.debut)),
+    el("div", { class: "carte" },
+      el("div", { class: "doux" }, "Proposé : " + P.source + (cur ? " · cette classe : " + cur.id : "")),
+      el("div", { class: "ligne", style: "margin-top:8px" },
+        el("button", { class: "btn nav", disabled: i <= 0, onclick: () => aller(-1) }, "◀"),
+        el("div", { class: "grand", style: "text-align:center" }, ligne ? el("div", {}, el("strong", {}, ligne.titre), el("div", { class: "doux" }, ligne.sequence + " · " + ligne.id)) : el("span", { class: "err" }, "Aucune séance pour ce niveau")),
+        el("button", { class: "btn nav", disabled: i < 0 || i >= lignes.length - 1, onclick: () => aller(1) }, "▶")),
+      el("div", { class: "bascule", style: "margin-top:10px" },
+        el("button", { class: "btn" + (P.termine ? " on" : ""), onclick: () => { P.termine = true; regen(); } }, "Séance terminée"),
+        el("button", { class: "btn" + (!P.termine ? " on" : ""), onclick: () => { P.termine = false; regen(); } }, "Pas terminée")),
+      !P.termine && el("div", {}, el("label", {}, "Arrêt à (étape, facultatif)"),
+        el("input", { type: "text", value: P.etape, placeholder: "ex. partie 3", onchange: (e) => { P.etape = e.target.value; regen(); } }))),
+    el("label", {}, "Contenu de séance (écrit dans ED)"),
+    el("textarea", { oninput: (e) => (P.contenuSeance = e.target.value) }, P.contenuSeance),
+    el("label", {}, "Travail à faire (placé au prochain cours réel)"),
+    el("textarea", { oninput: (e) => (P.travailAFaire = e.target.value) }, P.travailAFaire),
+    el("div", { class: "actions" }, el("button", { class: "btn prim", disabled: !ligne, onclick: () => ajouterAuLot(P) }, "Ajouter au lot")));
+}
+
+async function ajouterAuLot(P) {
+  const c = P.cours;
+  S.lot = S.lot.filter((p) => !(p.classe === c.classe && p.date === c.date));
+  S.lot.push({ classe: c.classe, date: c.date, heure: c.debut, id: P.id, termine: P.termine, etape: P.etape, contenuSeance: P.contenuSeance.trim(), travailAFaire: P.travailAFaire.trim() });
+  S.curseurs[c.classe] = { id: P.id, termine: P.termine, etape: P.etape, date: c.date, maj: new Date().toISOString() };
+  S.pointage = null; afficher();
+  try { await Promise.all([sauverLot(), sauverCurseurs()]); message(c.classe + " ajoutée au lot."); }
+  catch (e) { message("Non sauvegardé : " + e.message, 6000); }
+}
+
+function vueLot(v) {
+  if (!S.lot.length) return v.append(el("p", { class: "doux" }, "Lot vide. Pointez des cours dans l'onglet Pointer."));
+  v.append(el("p", { class: "doux" }, "1. Simuler : ED est relu, rien n'est écrit. 2. Écrire : après votre confirmation."));
+  S.lot.forEach((p, n) => {
+    const s = S.simu[cleCours(p)];
+    v.append(el("div", { class: "carte" },
+      el("div", { class: "ligne" }, el("strong", { class: "grand" }, p.classe + " · " + jourCourt(p.date) + " " + (p.heure || "")),
+        el("button", { class: "btn", onclick: async () => { S.lot.splice(n, 1); delete S.simu[cleCours(p)]; afficher(); await sauverLot().catch((e) => message(e.message)); } }, "Retirer")),
+      el("label", {}, "Contenu de séance"),
+      el("textarea", { oninput: (e) => { p.contenuSeance = e.target.value; delete S.simu[cleCours(p)]; } }, p.contenuSeance),
+      el("label", {}, "Travail à faire" + (s?.pourLe ? " — pour le " + jourCourt(s.pourLe) : "")),
+      el("textarea", { oninput: (e) => { p.travailAFaire = e.target.value; delete S.simu[cleCours(p)]; } }, p.travailAFaire),
+      s && el("div", { style: "margin-top:8px" },
+        s.erreur && el("div", { class: "err" }, s.erreur),
+        s.avertissements?.map((a) => el("div", { class: "alerte" }, "⚠ " + a)),
+        s.existant?.map(([quoi, texte]) => el("div", { class: "alerte" },
+          el("div", {}, "⚠ Déjà rempli (" + quoi + ") :"), el("pre", {}, texte))),
+        s.existant?.length ? el("label", { style: "color:var(--alerte)" },
+          el("input", { type: "checkbox", checked: !!p.force, onchange: (e) => (p.force = e.target.checked) }), " Remplacer le contenu existant") : null,
+        s.pret && el("div", { class: "ok" }, "✓ Prêt à écrire" + (s.pourLe ? " (travail pour le " + jourCourt(s.pourLe) + ")" : "")),
+        s.resultat && el("div", { class: s.resultat.startsWith("✓") ? "ok" : "err" }, s.resultat))));
+  });
+  const simules = S.lot.filter((p) => { const s = S.simu[cleCours(p)]; return s && !s.erreur && (s.pret || (s.existant?.length && p.force)); });
+  v.append(el("div", { class: "actions" },
+    el("button", { class: "btn", onclick: simuler }, "Simuler (" + S.lot.length + ")"),
+    el("button", { class: "btn prim", disabled: !simules.length, onclick: () => ecrire(simules) }, "Écrire (" + simules.length + ")")));
+}
+
+const corpsCahier = (p, dryRun) => JSON.stringify({ classeId: p.classe, date: p.date, contenuSeance: p.contenuSeance, travailAFaire: p.travailAFaire || undefined, dryRun, force: !!p.force });
+
+async function simuler() {
+  for (const p of S.lot) {
+    let s;
+    try {
+      const r = await api("/cahier", { method: "POST", body: corpsCahier(p, true) });
+      if (r.erreur) s = { erreur: r.erreur };
+      else {
+        const existant = [];
+        if (r.contenuSeance?.actuel) existant.push(["séance du " + jourCourt(p.date), r.contenuSeance.actuel]);
+        if (r.travailAFaire?.actuel) existant.push(["travail pour le " + jourCourt(r.travailAFaire.pourLe), r.travailAFaire.actuel]);
+        s = { pourLe: r.travailAFaire?.pourLe, avertissements: r.avertissements, existant, pret: r.dryRun === true && !existant.length };
+      }
+    } catch (e) { s = { erreur: e.message }; }
+    S.simu[cleCours(p)] = s; afficher();
+  }
+}
+
+async function ecrire(liste) {
+  const rec = liste.map((p) => "• " + p.classe + " " + jourCourt(p.date) + (p.force ? " (REMPLACE l'existant)" : "")).join("\n");
+  if (!confirm("Écrire dans EcoleDirecte ?\n\n" + rec)) return;
+  for (const p of liste) {
+    const s = S.simu[cleCours(p)];
+    try {
+      const r = await api("/cahier", { method: "POST", body: corpsCahier(p, false) });
+      const v = r.verification || {};
+      if (r.ecrit && Object.values(v).every(Boolean)) {
+        S.lot = S.lot.filter((x) => x !== p);
+        S.journal.unshift({ ...r, quand: new Date().toISOString() });
+        delete S.simu[cleCours(p)];
+        message("✓ " + p.classe + " écrit.");
+      } else s.resultat = r.erreur || r.refus || "Écrit mais relecture différente : vérifier dans ED.";
+    } catch (e) { s.resultat = "Échec : " + e.message; }
+    afficher();
+  }
+  await sauverLot().catch((e) => message(e.message));
+}
+
+function vueJournal(v) {
+  if (!S.journal.length) return v.append(el("p", { class: "doux" }, "Aucune écriture."));
+  for (const j of S.journal) {
+    v.append(el("div", { class: "carte" },
+      el("div", { class: "ligne" }, el("strong", { class: "grand" }, j.classe + " · " + (j.cours || "")),
+        el("span", { class: "etiq " + (Object.values(j.verification || {}).every(Boolean) ? "ok" : "err") }, Object.values(j.verification || {}).every(Boolean) ? "vérifié" : "à vérifier")),
+      el("div", { class: "doux" }, "écrit le " + new Date(j.quand).toLocaleString("fr-FR") + (j.travailAFaire?.pourLe ? " · travail pour le " + jourCourt(j.travailAFaire.pourLe) : ""))));
+  }
+}
+
+function vueReglages(v) {
+  const r = stock.lire("reglages", {});
+  const url = el("input", { type: "url", value: r.url || "https://ecoledirecte-mcp.blanchard-romain.workers.dev" });
+  const cle = el("input", { type: "password", value: r.cle || "", autocomplete: "off" });
+  v.append(el("label", {}, "Adresse du Worker"), url, el("label", {}, "Clé d'application (APP_KEY)"), cle,
+    el("p", { class: "doux" }, "La clé reste dans ce navigateur. Elle ne donne accès qu'à cette page, pas à votre compte EcoleDirecte."),
+    el("div", { class: "actions" }, el("button", { class: "btn prim", onclick: () => { stock.ecrire("reglages", { url: url.value.trim(), cle: cle.value.trim() }); charger(); } }, "Enregistrer et charger")));
+}
+
+// ---------- chargement ----------
+async function charger() {
+  try {
+    message("Chargement…", 10000);
+    const [progression, etat, cours] = await Promise.all([api("/progression"), api("/etat"), api("/cours?debut=" + decaler(-JOURS_PASSES) + "&fin=" + decaler(0))]);
+    Object.assign(S, { progression, curseurs: etat.curseurs, lot: etat.lot, journal: etat.journal, cours });
+    S.vue = S.vue === "reglages" ? "pointer" : S.vue;
+    message("Prêt.", 1200);
+  } catch (e) {
+    message(e.message, 6000);
+    if (/Réglages|clé/i.test(e.message)) S.vue = "reglages";
+  }
+  afficher();
+}
+
+$("#onglets").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { S.vue = b.dataset.vue; S.pointage = null; afficher(); } });
+charger();
+</script>
+</body>
+</html>
